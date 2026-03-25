@@ -6,36 +6,122 @@ A highly customizable bingo card generator with PDF output and probability calcu
 
 import random
 import math
-import itertools
 from typing import List, Tuple, Optional, Set
 from dataclasses import dataclass
-from PIL import Image, ImageDraw, ImageFont
-from reportlab.lib.pagesizes import A4, letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+from PIL import Image
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from reportlab.lib.units import inch, mm
-from reportlab.platypus.flowables import KeepTogether
+from reportlab.lib.units import mm
 import io
 import os
+from pprint import pformat
 
 @dataclass
 class BingoConfig:
-    """Configuration class for bingo card generation"""
-    cards_per_page: int = 4
-    page_title: str = "BINGO CARDS"
-    card_width: float = 80  # mm
-    card_height: float = 50  # mm
-    card_margin: float = 10  # mm
-    cell_padding: float = 2  # mm
-    font_size: int = 12
-    title_font_size: int = 16
-    empty_image_path: Optional[str] = None
-    page_size = A4
+    """Configuration for bingo generation and PDF rendering.
+
+    Units:
+    - All sizes/margins/gaps are millimeters.
+    """
+    # Page layout
+    pages: int = 2
+    page_columns: int = 2
+    page_rows: int = 3
+    page_size = landscape(A4)
+    page_margin_top: float = 2
+    page_margin_bottom: float = 0
+    page_margin_left: float = 2
+    page_margin_right: float = 0
+    card_gap: float = 5  # same spacing for horizontal and vertical separation
+
+    # Card layout/content
+    round_number: int = 1
+    card_width: float = 144
+    card_height: float = 65
+    header_gap: float = 0.0
+    event_title: str = "GRAN BINGO DE FES-TE JOVE"
+    round_font_size: int = 12
+    event_title_font_size: int = 12
+    empty_image_path: Optional[str] = "Logo_FJ_imatge-invert.jpg"
+
+    # Table visual style
+    font_size: int = 16
+    number_bold: bool = True
     number_color: str = '#000000'
     empty_color: str = '#E0E0E0'
+    header_text_color: str = '#000000'
     border_color: str = '#000000'
     border_width: float = 1
+
+    @property
+    def cards_per_page(self) -> int:
+        return self.page_columns * self.page_rows
+
+    def __post_init__(self) -> None:
+        positive_ints = {
+            "pages": self.pages,
+            "page_columns": self.page_columns,
+            "page_rows": self.page_rows,
+            "round_number": self.round_number,
+            "font_size": self.font_size,
+            "round_font_size": self.round_font_size,
+            "event_title_font_size": self.event_title_font_size,
+        }
+        positive_floats = {
+            "card_width": self.card_width,
+            "card_height": self.card_height,
+        }
+        non_negative_floats = {
+            "page_margin_top": self.page_margin_top,
+            "page_margin_bottom": self.page_margin_bottom,
+            "page_margin_left": self.page_margin_left,
+            "page_margin_right": self.page_margin_right,
+            "card_gap": self.card_gap,
+            "header_gap": self.header_gap,
+            "border_width": self.border_width,
+        }
+
+        for key, value in positive_ints.items():
+            if value <= 0:
+                raise ValueError(f"'{key}' must be > 0. Got {value}.")
+        for key, value in positive_floats.items():
+            if value <= 0:
+                raise ValueError(f"'{key}' must be > 0. Got {value}.")
+        for key, value in non_negative_floats.items():
+            if value < 0:
+                raise ValueError(f"'{key}' must be >= 0. Got {value}.")
+
+    def to_dict(self) -> dict:
+        """Return a serializable snapshot of effective configuration."""
+        return {
+            "page_columns": self.page_columns,
+            "page_rows": self.page_rows,
+            "cards_per_page": self.cards_per_page,
+            "pages": self.pages,
+            "page_size": self.page_size,
+            "page_margin_top": self.page_margin_top,
+            "page_margin_bottom": self.page_margin_bottom,
+            "page_margin_left": self.page_margin_left,
+            "page_margin_right": self.page_margin_right,
+            "card_gap": self.card_gap,
+            "round_number": self.round_number,
+            "card_width": self.card_width,
+            "card_height": self.card_height,
+            "header_gap": self.header_gap,
+            "event_title": self.event_title,
+            "round_font_size": self.round_font_size,
+            "event_title_font_size": self.event_title_font_size,
+            "font_size": self.font_size,
+            "number_bold": self.number_bold,
+            "empty_image_path": self.empty_image_path,
+            "number_color": self.number_color,
+            "empty_color": self.empty_color,
+            "header_text_color": self.header_text_color,
+            "border_color": self.border_color,
+            "border_width": self.border_width,
+        }
 
 class BingoCard:
     """Represents a single 90-ball bingo card"""
@@ -76,7 +162,7 @@ class BingoCard:
             
             # Fill each column according to the rows chosen in the layout
             success = True
-            for col in range(8):
+            for col in range(9):
                 target_rows = [row for row in range(3) if row_layout[row][col]]
                 if not self._fill_column_with_rows(col, target_rows, column_ranges[col]):
                     success = False
@@ -87,42 +173,14 @@ class BingoCard:
                 
         return False
     
-    def _generate_column_distribution(self) -> List[int]:
-        """Generate a valid distribution of numbers across columns"""
-        # Each column can have 0-3 numbers, total must be 15
-        # Generate random distribution
-        distribution = []
-        remaining = 15
-        
-        for i in range(8):  # First 8 columns
-            max_for_this_col = min(3, remaining - (8 - i))  # Ensure we can fill remaining columns
-            min_for_this_col = max(0, remaining - 3 * (8 - i))  # Ensure we don't exceed 3 per remaining column
-            
-            if max_for_this_col >= min_for_this_col:
-                count = random.randint(min_for_this_col, max_for_this_col)
-            else:
-                count = 0
-            
-            distribution.append(count)
-            remaining -= count
-        
-        # Last column gets whatever remains
-        distribution.append(remaining)
-        
-        # Validate distribution
-        if any(x > 3 or x < 0 for x in distribution):
-            return [0] * 9  # Invalid distribution
-            
-        return distribution
-    
     def _generate_row_layout(self) -> List[List[bool]]:
-        """Generate a row-based layout: 3 rows x 8 columns with 5 numbers per row.
+        """Generate a row-based layout: 3 rows x 9 columns with 5 numbers per row.
         Returns a boolean grid indicating where numbers should be placed.
         """
-        layout = [[False for _ in range(8)] for _ in range(3)]
+        layout = [[False for _ in range(9)] for _ in range(3)]
         
         for row in range(3):
-            chosen_cols = random.sample(range(8), 5)
+            chosen_cols = random.sample(range(9), 5)
             for col in chosen_cols:
                 layout[row][col] = True
         
@@ -150,34 +208,6 @@ class BingoCard:
         
         return True
 
-    def _fill_column(self, col: int, count: int, number_range: Tuple[int, int]) -> bool:
-        """Fill a column with the specified number of random numbers"""
-        if count == 0:
-            return True
-            
-        # Get available numbers for this column
-        start, end = number_range
-        available_numbers = [n for n in range(start, end + 1) if n not in self.numbers_used]
-        
-        if len(available_numbers) < count:
-            return False
-            
-        # Select random numbers
-        selected_numbers = random.sample(available_numbers, count)
-        selected_numbers.sort()
-        
-        # Select random positions in this column for the numbers
-        available_positions = [(0, col), (1, col), (2, col)]
-        selected_positions = random.sample(available_positions, count)
-        
-        # Place numbers in selected positions
-        for i, pos in enumerate(selected_positions):
-            row, column = pos
-            self.grid[row][column] = selected_numbers[i]
-            self.numbers_used.add(selected_numbers[i])
-        
-        return True
-    
     def _validate_card(self) -> bool:
         """Validate that the card meets 90-ball bingo rules"""
         # Check that each row has exactly 5 numbers
@@ -222,6 +252,7 @@ class BingoCardGenerator:
     def __init__(self, config: BingoConfig):
         self.config = config
         self.generated_cards: Set[BingoCard] = set()
+        self._empty_cell_image_cache: dict = {}
     
     def generate_unique_cards(self, num_cards: int) -> List[BingoCard]:
         """Generate a specified number of unique bingo cards"""
@@ -244,85 +275,298 @@ class BingoCardGenerator:
     
     def create_pdf(self, cards: List[BingoCard], filename: str = "bingo_cards.pdf"):
         """Create a PDF with the generated bingo cards"""
-        doc = SimpleDocTemplate(
+        round_style, event_title_style = self._build_header_styles()
+        self._validate_layout_fit(round_style, event_title_style)
+
+        doc = BaseDocTemplate(
             filename,
             pagesize=self.config.page_size,
-            leftMargin=self.config.card_margin * mm,
-            rightMargin=self.config.card_margin * mm,
-            topMargin=self.config.card_margin * mm,
-            bottomMargin=self.config.card_margin * mm
+            leftMargin=self.config.page_margin_left * mm,
+            rightMargin=self.config.page_margin_right * mm,
+            topMargin=self.config.page_margin_top * mm,
+            bottomMargin=self.config.page_margin_bottom * mm,
         )
+        frame = Frame(
+            doc.leftMargin,
+            doc.bottomMargin,
+            doc.width,
+            doc.height,
+            leftPadding=0,
+            rightPadding=0,
+            topPadding=0,
+            bottomPadding=0,
+            id='normal',
+        )
+        doc.addPageTemplates([PageTemplate(id='normal', frames=[frame])])
         
         story = []
-        styles = getSampleStyleSheet()
-        
-        # Create title style
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Title'],
-            fontSize=self.config.title_font_size,
-            alignment=1  # Center alignment
-        )
         
         # Process cards in pages
         for page_start in range(0, len(cards), self.config.cards_per_page):
             page_cards = cards[page_start:page_start + self.config.cards_per_page]
-            
-            # Add title
-            if self.config.page_title:
-                story.append(Paragraph(self.config.page_title, title_style))
-                story.append(Spacer(1, 10 * mm))
-            
-            # Create cards table for this page
-            cards_table = self._create_cards_table(page_cards)
-            story.append(KeepTogether(cards_table))
+
+            # Create fixed cards grid for this page (2 columns x 4 rows by default)
+            cards_table = self._create_cards_grid(page_cards, round_style, event_title_style)
+            story.append(cards_table)
             
             # Add page break if not last page
             if page_start + self.config.cards_per_page < len(cards):
-                story.append(Spacer(1, 20 * mm))
+                story.append(PageBreak())
         
         doc.build(story)
+        cell_w_mm, cell_h_mm = self.get_cell_size_mm()
+        print(f"Bingo cell size: {cell_w_mm:.2f}mm x {cell_h_mm:.2f}mm")
         print(f"PDF created: {filename}")
-    
-    def _create_cards_table(self, cards: List[BingoCard]) -> Table:
-        """Create a table layout for multiple bingo cards"""
-        # Calculate cards per row based on page width
-        page_width = self.config.page_size[0] - (2 * self.config.card_margin * mm)
-        card_width_points = self.config.card_width * mm
-        cards_per_row = max(1, int(page_width / (card_width_points + self.config.card_margin * mm)))
-        
-        table_data = []
-        
-        # Arrange cards in rows
-        for i in range(0, len(cards), cards_per_row):
-            row_cards = cards[i:i + cards_per_row]
-            card_tables = [self._create_single_card_table(card) for card in row_cards]
-            table_data.append(card_tables)
-        
-        # Create main table
-        main_table = Table(table_data)
-        main_table.setStyle(TableStyle([
+
+    def _build_header_styles(self) -> Tuple[ParagraphStyle, ParagraphStyle]:
+        """Create header styles used by both rendering and layout validation."""
+        styles = getSampleStyleSheet()
+        round_style = ParagraphStyle(
+            'RoundTitle',
+            parent=styles['Heading5'],
+            fontSize=self.config.round_font_size,
+            alignment=0,  # Left alignment
+            textColor=colors.HexColor(self.config.header_text_color),
+            leading=self.config.round_font_size * 1.2,
+            spaceAfter=0
+        )
+        event_title_style = ParagraphStyle(
+            'EventTitleRight',
+            parent=styles['Heading5'],
+            fontSize=self.config.event_title_font_size,
+            alignment=2,  # Right alignment
+            textColor=colors.HexColor(self.config.header_text_color),
+            leading=self.config.event_title_font_size * 1.2,
+            spaceAfter=0
+        )
+        return round_style, event_title_style
+
+    def _get_number_font_name(self) -> str:
+        """Return the ReportLab font name for bingo numbers."""
+        return 'Helvetica-Bold' if self.config.number_bold else 'Helvetica'
+
+    def get_cell_size_mm(self) -> Tuple[float, float]:
+        """Return bingo table cell size in millimeters."""
+        round_style, event_title_style = self._build_header_styles()
+        table_height_pt = self._get_bingo_table_height_pt(round_style, event_title_style)
+        table_height_mm = table_height_pt / mm
+        return (self.config.card_width / 9.0, table_height_mm / 3.0)
+
+    def _create_cards_grid(
+        self,
+        cards: List[BingoCard],
+        round_style: ParagraphStyle,
+        event_title_style: ParagraphStyle
+    ) -> Table:
+        """Create a fixed grid for cards with configurable rows and columns."""
+        grid_data: List[List[object]] = []
+        card_index = 0
+
+        total_columns = self.config.page_columns * 2 - 1
+        for row_idx in range(self.config.page_rows):
+            row_flowables: List[object] = []
+            for col_idx in range(total_columns):
+                if col_idx % 2 == 1:
+                    row_flowables.append(Spacer(self.config.card_gap * mm, 1))
+                    continue
+
+                if card_index < len(cards):
+                    row_flowables.append(
+                        self._create_card_container(cards[card_index], round_style, event_title_style)
+                    )
+                    card_index += 1
+                else:
+                    row_flowables.append(Spacer(1, self.config.card_height * mm))
+            grid_data.append(row_flowables)
+            if row_idx < self.config.page_rows - 1:
+                grid_data.append([Spacer(1, self.config.card_gap * mm) for _ in range(total_columns)])
+
+        col_widths = []
+        for col_idx in range(total_columns):
+            if col_idx % 2 == 0:
+                col_widths.append(self.config.card_width * mm)
+            else:
+                col_widths.append(self.config.card_gap * mm)
+
+        row_heights = []
+        for row_idx in range(len(grid_data)):
+            if row_idx % 2 == 0:
+                row_heights.append(None)
+            else:
+                row_heights.append(self.config.card_gap * mm)
+
+        grid_table = Table(
+            grid_data,
+            colWidths=col_widths,
+            rowHeights=row_heights,
+            splitByRow=0,
+        )
+        # Keep grid anchored to the left so horizontal margins are predictable.
+        grid_table.hAlign = 'LEFT'
+        grid_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('NOSPLIT', (0, 0), (-1, -1)),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
         ]))
-        
-        return main_table
-    
-    def _create_single_card_table(self, card: BingoCard) -> Table:
+        return grid_table
+
+    def _create_card_container(
+        self,
+        card: BingoCard,
+        round_style: ParagraphStyle,
+        event_title_style: ParagraphStyle
+    ) -> Table:
+        """Create a card container with a one-line header and the bingo table."""
+        header_row = self._build_card_header_row(round_style, event_title_style)
+        header_height = self._get_header_row_height_pt(round_style, event_title_style)
+        header_gap_pt = self.config.header_gap * mm
+        table_height_pt = self._get_bingo_table_height_pt(round_style, event_title_style)
+        card_table = self._create_single_card_table(card, table_height_pt)
+        container = Table(
+            [[header_row], [Spacer(1, self.config.header_gap * mm)], [card_table]],
+            colWidths=[self.config.card_width * mm],
+            rowHeights=[header_height, header_gap_pt, table_height_pt],
+        )
+        container.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ]))
+        return container
+
+    def _build_card_header_row(
+        self,
+        round_style: ParagraphStyle,
+        event_title_style: ParagraphStyle
+    ) -> Table:
+        round_text = Paragraph(f"RONDA {self.config.round_number}", round_style)
+        event_title = Paragraph(self.config.event_title, event_title_style)
+        header_row = Table(
+            [[round_text, event_title]],
+            colWidths=[self.config.card_width * mm * 0.35, self.config.card_width * mm * 0.65],
+        )
+        header_row.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0.5 * mm),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0.5 * mm),
+        ]))
+        return header_row
+
+    def _get_header_row_height_pt(
+        self,
+        round_style: ParagraphStyle,
+        event_title_style: ParagraphStyle
+    ) -> float:
+        header_row = self._build_card_header_row(round_style, event_title_style)
+        _, header_height = header_row.wrap(self.config.card_width * mm, 1_000_000)
+        return header_height
+
+    def _get_bingo_table_height_pt(
+        self,
+        round_style: ParagraphStyle,
+        event_title_style: ParagraphStyle
+    ) -> float:
+        total_card_height_pt = self.config.card_height * mm
+        header_height_pt = self._get_header_row_height_pt(round_style, event_title_style)
+        table_height_pt = total_card_height_pt - header_height_pt - (self.config.header_gap * mm)
+        if table_height_pt <= 0:
+            raise ValueError(
+                "card_height is too small for current header fonts/gap. "
+                "Increase card_height or reduce round/event font sizes/header_gap."
+            )
+        return table_height_pt
+
+    def _get_empty_cell_image_bytes(self, cell_width: float, cell_height: float) -> Optional[bytes]:
+        """Crop and resize empty-cell image to fill the cell, preserving aspect ratio."""
+        if not self.config.empty_image_path or not os.path.exists(self.config.empty_image_path):
+            return None
+
+        cache_key = (
+            self.config.empty_image_path,
+            int(cell_width),
+            int(cell_height),
+            os.path.getmtime(self.config.empty_image_path),
+        )
+        if cache_key in self._empty_cell_image_cache:
+            return self._empty_cell_image_cache[cache_key]
+
+        target_w = max(1, int(cell_width * 2))
+        target_h = max(1, int(cell_height * 2))
+
+        with Image.open(self.config.empty_image_path) as source:
+            image = source.convert("RGBA")
+            src_ratio = image.width / image.height
+            target_ratio = target_w / target_h
+
+            if src_ratio > target_ratio:
+                crop_w = int(image.height * target_ratio)
+                crop_h = image.height
+            else:
+                crop_w = image.width
+                crop_h = int(image.width / target_ratio)
+
+            left = max(0, (image.width - crop_w) // 2)
+            top = max(0, (image.height - crop_h) // 2)
+            right = left + crop_w
+            bottom = top + crop_h
+
+            cropped = image.crop((left, top, right, bottom))
+            resized = cropped.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+            buffer = io.BytesIO()
+            resized.save(buffer, format="PNG")
+            image_bytes = buffer.getvalue()
+
+        self._empty_cell_image_cache[cache_key] = image_bytes
+        return image_bytes
+
+    def _validate_layout_fit(
+        self,
+        round_style: ParagraphStyle,
+        event_title_style: ParagraphStyle
+    ) -> None:
+        """Ensure configured layout fits printable area using actual wrapped sizes."""
+        page_width, page_height = self.config.page_size
+        usable_width = page_width - ((self.config.page_margin_left + self.config.page_margin_right) * mm)
+        usable_height = page_height - ((self.config.page_margin_top + self.config.page_margin_bottom) * mm)
+        dummy_cards = [BingoCard() for _ in range(self.config.cards_per_page)]
+        grid_table = self._create_cards_grid(dummy_cards, round_style, event_title_style)
+        required_width, required_height = grid_table.wrap(usable_width, usable_height)
+
+        if required_width > usable_width or required_height > usable_height:
+            raise ValueError(
+                "Layout does not fit page. Reduce card dimensions/rows/columns/gap or margins, "
+                "or increase page size."
+            )
+
+    def _create_single_card_table(self, card: BingoCard, table_height_pt: float) -> Table:
         """Create a table for a single bingo card"""
         table_data = []
+        cell_w_pt = (self.config.card_width * mm) / 9.0
+        cell_h_pt = table_height_pt / 3.0
+        empty_cell_image = self._get_empty_cell_image_bytes(cell_w_pt, cell_h_pt)
         
         for row in card.grid:
             row_data = []
             for cell in row:
                 if cell is None:
                     # Empty cell
-                    if self.config.empty_image_path and os.path.exists(self.config.empty_image_path):
+                    if empty_cell_image:
                         try:
-                            img = RLImage(self.config.empty_image_path, 
-                                        width=15*mm, height=10*mm)
+                            img = RLImage(io.BytesIO(empty_cell_image), width=cell_w_pt, height=cell_h_pt)
                             row_data.append(img)
-                        except:
+                        except Exception:
                             row_data.append("")
                     else:
                         row_data.append("")
@@ -332,26 +576,33 @@ class BingoCardGenerator:
         
         # Create table
         table = Table(table_data, 
-                     colWidths=[self.config.card_width * mm / 9] * 9,
-                     rowHeights=[self.config.card_height * mm / 3] * 3)
+                     colWidths=[cell_w_pt] * 9,
+                     rowHeights=[cell_h_pt] * 3)
         
         # Style the table
         table.setStyle(TableStyle([
             ('FONTSIZE', (0, 0), (-1, -1), self.config.font_size),
+            ('FONTNAME', (0, 0), (-1, -1), self._get_number_font_name()),
+            ('LEADING', (0, 0), (-1, -1), self.config.font_size),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
             ('GRID', (0, 0), (-1, -1), self.config.border_width, colors.HexColor(self.config.border_color)),
             ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor(self.config.number_color)),
         ]))
         
         # Style empty cells
-        for row_idx, row in enumerate(card.grid):
-            for col_idx, cell in enumerate(row):
-                if cell is None:
-                    table.setStyle(TableStyle([
-                        ('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), 
-                         colors.HexColor(self.config.empty_color)),
-                    ]))
+        if not empty_cell_image:
+            for row_idx, row in enumerate(card.grid):
+                for col_idx, cell in enumerate(row):
+                    if cell is None:
+                        table.setStyle(TableStyle([
+                            ('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), 
+                             colors.HexColor(self.config.empty_color)),
+                        ]))
         
         return table
 
@@ -429,30 +680,22 @@ class ProbabilityCalculator:
 def main():
     """Example usage of the bingo card generator"""
     
-    # Create configuration
-    config = BingoConfig(
-        cards_per_page=4,
-        page_title="90-BALL BINGO CARDS",
-        card_width=85,
-        card_height=55,
-        card_margin=15,
-        font_size=10,
-        title_font_size=18,
-        # empty_image_path="star.png",  # Uncomment if you have an image
-        number_color='#2E3440',
-        empty_color='#ECEFF4',
-        border_color='#4C566A'
-    )
+    # Edit BingoConfig defaults above, or override only what you need here.
+    config = BingoConfig()
+    print("Active configuration:")
+    print(pformat(config.to_dict(), sort_dicts=False))
     
     # Generate cards
     generator = BingoCardGenerator(config)
-    num_cards = 20
+    num_cards = config.cards_per_page * config.pages
     cards = generator.generate_unique_cards(num_cards)
     
     print(f"Generated {len(cards)} unique cards")
     
     # Create PDF
     generator.create_pdf(cards, "my_bingo_cards.pdf")
+    cell_w_mm, cell_h_mm = generator.get_cell_size_mm()
+    print(f"Configured cell size: {cell_w_mm:.2f}mm x {cell_h_mm:.2f}mm")
     
     # Calculate probabilities
     calc = ProbabilityCalculator()
