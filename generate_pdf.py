@@ -14,6 +14,7 @@ from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import mm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 import io
 import os
 from pprint import pformat
@@ -26,7 +27,7 @@ class BingoConfig:
     - All sizes/margins/gaps are millimeters.
     """
     # Page layout
-    pages: int = 2
+    pages: int = 3
     page_columns: int = 2
     page_rows: int = 3
     page_size = landscape(A4)
@@ -41,7 +42,7 @@ class BingoConfig:
     card_width: float = 144
     card_height: float = 65
     header_gap: float = 0.0
-    event_title: str = "GRAN BINGO DE FES-TE JOVE"
+    event_title: str = "GRAN BINGO DELS 25 ANYS DE FES-TE JOVE!"
     round_font_size: int = 12
     event_title_font_size: int = 12
     empty_image_path: Optional[str] = "Logo_FJ_imatge-invert.jpg"
@@ -176,15 +177,35 @@ class BingoCard:
     def _generate_row_layout(self) -> List[List[bool]]:
         """Generate a row-based layout: 3 rows x 9 columns with 5 numbers per row.
         Returns a boolean grid indicating where numbers should be placed.
+        Every column has at least one number (90-ball bingo rule).
         """
         layout = [[False for _ in range(9)] for _ in range(3)]
-        
+
+        # Place one number per column, spread across rows (each row gets <= 5)
+        cols = list(range(9))
+        random.shuffle(cols)
+        row_counts = self._initial_row_counts()
+        col_idx = 0
+        for row, count in enumerate(row_counts):
+            for _ in range(count):
+                layout[row][cols[col_idx]] = True
+                col_idx += 1
+
+        # Fill each row to exactly 5 numbers
         for row in range(3):
-            chosen_cols = random.sample(range(9), 5)
-            for col in chosen_cols:
+            need = 5 - sum(layout[row])
+            available = [col for col in range(9) if not layout[row][col]]
+            for col in random.sample(available, need):
                 layout[row][col] = True
-        
+
         return layout
+
+    def _initial_row_counts(self) -> List[int]:
+        """Random row counts that sum to 9 (one per column), each at most 5."""
+        while True:
+            counts = [random.randint(0, 5) for _ in range(3)]
+            if sum(counts) == 9:
+                return counts
 
     def _fill_column_with_rows(self, col: int, target_rows: List[int], number_range: Tuple[int, int]) -> bool:
         """Fill a column placing numbers specifically in the given target rows."""
@@ -227,10 +248,15 @@ class BingoCard:
         
         for col in range(9):
             start, end = column_ranges[col]
+            numbers_in_col = 0
             for row in range(3):
                 num = self.grid[row][col]
-                if num is not None and (num < start or num > end):
-                    return False
+                if num is not None:
+                    numbers_in_col += 1
+                    if num < start or num > end:
+                        return False
+            if numbers_in_col == 0:
+                return False
         
         return True
     
@@ -337,6 +363,7 @@ class BingoCardGenerator:
             alignment=2,  # Right alignment
             textColor=colors.HexColor(self.config.header_text_color),
             leading=self.config.event_title_font_size * 1.2,
+            spaceBefore=0,
             spaceAfter=0
         )
         return round_style, event_title_style
@@ -441,6 +468,18 @@ class BingoCardGenerator:
         ]))
         return container
 
+    def _get_header_column_widths(
+        self,
+        round_style: ParagraphStyle,
+    ) -> Tuple[float, float]:
+        """Size columns from content so the title gets all space not used by RONDA."""
+        card_width_pt = self.config.card_width * mm
+        header_gap_pt = 1 * mm
+        round_label = f"RONDA {self.config.round_number}"
+        round_width_pt = stringWidth(round_label, round_style.fontName, round_style.fontSize)
+        left_width = round_width_pt + header_gap_pt
+        return left_width, card_width_pt - left_width
+
     def _build_card_header_row(
         self,
         round_style: ParagraphStyle,
@@ -448,9 +487,10 @@ class BingoCardGenerator:
     ) -> Table:
         round_text = Paragraph(f"RONDA {self.config.round_number}", round_style)
         event_title = Paragraph(self.config.event_title, event_title_style)
+        left_width, right_width = self._get_header_column_widths(round_style)
         header_row = Table(
             [[round_text, event_title]],
-            colWidths=[self.config.card_width * mm * 0.35, self.config.card_width * mm * 0.65],
+            colWidths=[left_width, right_width],
         )
         header_row.setStyle(TableStyle([
             ('ALIGN', (0, 0), (0, 0), 'LEFT'),
