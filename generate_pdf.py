@@ -14,7 +14,7 @@ from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import mm
-from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfbase.pdfmetrics import stringWidth, getAscentDescent
 import io
 import os
 from pprint import pformat
@@ -48,7 +48,7 @@ class BingoConfig:
     empty_image_path: Optional[str] = "Logo_FJ_imatge-invert.jpg"
 
     # Table visual style
-    font_size: int = 16
+    font_size: int = 24
     number_bold: bool = True
     number_color: str = '#000000'
     empty_color: str = '#E0E0E0'
@@ -372,6 +372,18 @@ class BingoCardGenerator:
         """Return the ReportLab font name for bingo numbers."""
         return 'Helvetica-Bold' if self.config.number_bold else 'Helvetica'
 
+    def _get_number_leading(self) -> float:
+        """Leading that vertically centers digit glyphs (no descenders) in a Table cell.
+
+        ReportLab's plain-string cell renderer positions the baseline at
+        (rowheight + leading) / 2 - fontsize. Setting leading == fontsize (the naive
+        choice) leaves a residual offset proportional to fontsize, so it only looks
+        centered at small sizes. Solving for the leading that puts the glyph's visual
+        midpoint (ascent / 2 above baseline) at the cell's center gives this formula.
+        """
+        ascent, _descent = getAscentDescent(self._get_number_font_name(), self.config.font_size)
+        return 2 * self.config.font_size - ascent
+
     def get_cell_size_mm(self) -> Tuple[float, float]:
         """Return bingo table cell size in millimeters."""
         round_style, event_title_style = self._build_header_styles()
@@ -623,7 +635,7 @@ class BingoCardGenerator:
         table.setStyle(TableStyle([
             ('FONTSIZE', (0, 0), (-1, -1), self.config.font_size),
             ('FONTNAME', (0, 0), (-1, -1), self._get_number_font_name()),
-            ('LEADING', (0, 0), (-1, -1), self.config.font_size),
+            ('LEADING', (0, 0), (-1, -1), self._get_number_leading()),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('LEFTPADDING', (0, 0), (-1, -1), 0),
